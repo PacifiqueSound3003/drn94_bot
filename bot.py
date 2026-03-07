@@ -14,7 +14,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, ChatMigrated
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -32,15 +32,15 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_ID", "").split(",") if x]
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN manquant.")
-if not ADMIN_IDS:
-    raise RuntimeError("ADMIN_ID manquant.")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL manquant.")
+if not ADMIN_IDS:
+    raise RuntimeError("ADMIN_ID manquant.")
 
 RULES_TEXT = (
     "📜 <b>RÈGLES DU GROUPE</b>\n\n"
@@ -57,8 +57,8 @@ RULES_TEXT = (
 
 AI_WARNING_TEXT = (
     "🚨⚠️ <b>Analyse du contenu via l’intelligence artificielle.</b>\n\n"
-    "Tout contenu posté pour attirer les membres en DM sera détecté pour notre IA "
-    "et l’utilisateur supprimé - blacklisté. 🚨🚨"
+    "Tout contenu posté pour attirer les membres en DM sera détecté "
+    "et l’utilisateur supprimé."
 )
 
 DEFAULT_BAD_WORDS = [
@@ -79,7 +79,7 @@ TEMP_RESTRICT_MINUTES = 30
 BAN_AFTER_STRIKES = 3
 RULES_EVERY_JOINS = 100
 WARNING_EVERY_HOURS = 3
-DELETE_WARNING_AFTER_MINUTES = 60
+DELETE_WARNING_AFTER_MINUTES = 30
 
 LINK_REGEX = re.compile(
     r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/|discord\.com/invite/|bit\.ly/|tinyurl\.com/)\S+"
@@ -202,6 +202,44 @@ def set_group_active(chat_id: int, is_active: bool):
                 WHERE group_id = %s;
                 """,
                 (is_active, chat_id),
+            )
+            conn.commit()
+
+
+def update_group_id(old_chat_id: int, new_chat_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE groups
+                SET group_id = %s, updated_at = NOW()
+                WHERE group_id = %s;
+                """,
+                (new_chat_id, old_chat_id),
+            )
+            cur.execute(
+                """
+                UPDATE bad_words
+                SET group_id = %s
+                WHERE group_id = %s;
+                """,
+                (new_chat_id, old_chat_id),
+            )
+            cur.execute(
+                """
+                UPDATE user_strikes
+                SET group_id = %s
+                WHERE group_id = %s;
+                """,
+                (new_chat_id, old_chat_id),
+            )
+            cur.execute(
+                """
+                UPDATE moderation_logs
+                SET group_id = %s
+                WHERE group_id = %s;
+                """,
+                (new_chat_id, old_chat_id),
             )
             conn.commit()
 
@@ -363,21 +401,6 @@ def list_bad_words(chat_id: int):
             return [row[0] for row in cur.fetchall()]
 
 
-def get_strikes(chat_id: int, user_id: int) -> int:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT strikes
-                FROM user_strikes
-                WHERE group_id = %s AND user_id = %s;
-                """,
-                (chat_id, user_id),
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-
-
 def add_strike(chat_id: int, user_id: int) -> int:
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -396,19 +419,6 @@ def add_strike(chat_id: int, user_id: int) -> int:
             return strikes
 
 
-def reset_strikes(chat_id: int, user_id: int):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM user_strikes
-                WHERE group_id = %s AND user_id = %s;
-                """,
-                (chat_id, user_id),
-            )
-            conn.commit()
-
-
 def log_action(chat_id: int, user_id: Optional[int], action: str, reason: Optional[str] = None):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -423,7 +433,7 @@ def log_action(chat_id: int, user_id: Optional[int], action: str, reason: Option
 
 
 # =========================================================
-# KEYBOARDS
+# UI
 # =========================================================
 
 
@@ -437,23 +447,18 @@ def admin_main_keyboard():
 
 
 def admin_back_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("⬅️ Menu principal", callback_data="admin_home")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Menu principal", callback_data="admin_home")]]
+    )
 
 
 def group_list_keyboard(groups, prefix: str):
     keyboard = []
     for group_id, title in groups:
-        label = f"👥 {str(title)[:40]}"
         keyboard.append(
-            [InlineKeyboardButton(label, callback_data=f"{prefix}:{group_id}")]
+            [InlineKeyboardButton(f"👥 {str(title)[:40]}", callback_data=f"{prefix}:{group_id}")]
         )
-
-    keyboard.append(
-        [InlineKeyboardButton("⬅️ Menu principal", callback_data="admin_home")]
-    )
+    keyboard.append([InlineKeyboardButton("⬅️ Menu principal", callback_data="admin_home")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -471,13 +476,14 @@ def group_actions_keyboard(group_id: int, is_active: bool = True):
 
 
 def group_words_keyboard(group_id: int):
-    keyboard = [
-        [InlineKeyboardButton("➕ Ajouter un mot", callback_data=f"words_add:{group_id}")],
-        [InlineKeyboardButton("➖ Supprimer un mot", callback_data=f"words_remove:{group_id}")],
-        [InlineKeyboardButton("⬅️ Retour au groupe", callback_data=f"group_menu:{group_id}")],
-        [InlineKeyboardButton("🏠 Menu principal", callback_data="admin_home")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Ajouter un mot", callback_data=f"words_add:{group_id}")],
+            [InlineKeyboardButton("➖ Supprimer un mot", callback_data=f"words_remove:{group_id}")],
+            [InlineKeyboardButton("⬅️ Retour au groupe", callback_data=f"group_menu:{group_id}")],
+            [InlineKeyboardButton("🏠 Menu principal", callback_data="admin_home")],
+        ]
+    )
 
 
 # =========================================================
@@ -485,24 +491,25 @@ def group_words_keyboard(group_id: int):
 # =========================================================
 
 
-async def ensure_admin_user(update: Update) -> bool:
-    user = update.effective_user
-    if not user or not is_main_admin(user.id):
-        if update.effective_message:
-            await update.effective_message.reply_text("⛔ Accès refusé.")
-        return False
-    return True
-
-
 def clear_admin_state(user_id: int):
     ADMIN_STATE.pop(user_id, None)
 
 
 def set_admin_state(user_id: int, action: str, group_id: Optional[int] = None):
-    ADMIN_STATE[user_id] = {
-        "action": action,
-        "group_id": group_id,
-    }
+    ADMIN_STATE[user_id] = {"action": action, "group_id": group_id}
+
+
+async def safe_edit(query, text, reply_markup=None, parse_mode=None):
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        raise
 
 
 async def delete_message_safe(message):
@@ -520,16 +527,7 @@ async def user_is_group_admin(chat_id: int, user_id: int, context: ContextTypes.
         return False
 
 
-def text_contains_link(message_text: str) -> bool:
-    return bool(LINK_REGEX.search(message_text))
-
-
-async def restrict_or_ban(
-    chat_id: int,
-    user_id: int,
-    context: ContextTypes.DEFAULT_TYPE,
-    reason: str,
-):
+async def restrict_or_ban(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, reason: str):
     strikes = add_strike(chat_id, user_id)
     log_action(chat_id, user_id, "strike", reason)
 
@@ -630,6 +628,18 @@ async def unrestrict_user_job(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Erreur unrestrict user=%s chat=%s : %s", user_id, chat_id, e)
 
 
+async def delete_warning_job(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    try:
+        await context.bot.delete_message(
+            chat_id=data["chat_id"],
+            message_id=data["message_id"],
+        )
+        set_last_warning_message_id(data["chat_id"], None)
+    except Exception:
+        pass
+
+
 async def send_ai_warning_to_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await context.bot.send_message(
@@ -646,38 +656,51 @@ async def send_ai_warning_to_group(chat_id: int, context: ContextTypes.DEFAULT_T
             name=f"delete_warn_{chat_id}_{msg.message_id}",
         )
         log_action(chat_id, None, "warning_sent", "message dissuasif")
+
+    except ChatMigrated as e:
+        new_chat_id = e.new_chat_id
+        logger.warning("Groupe migré %s -> %s", chat_id, new_chat_id)
+        update_group_id(chat_id, new_chat_id)
+
+        try:
+            msg = await context.bot.send_message(
+                chat_id=new_chat_id,
+                text=AI_WARNING_TEXT,
+                parse_mode=ParseMode.HTML,
+            )
+            set_last_warning_message_id(new_chat_id, msg.message_id)
+            context.job_queue.run_once(
+                delete_warning_job,
+                when=timedelta(minutes=DELETE_WARNING_AFTER_MINUTES),
+                data={"chat_id": new_chat_id, "message_id": msg.message_id},
+                name=f"delete_warn_{new_chat_id}_{msg.message_id}",
+            )
+        except Exception as inner_e:
+            logger.exception("Erreur après migration auto: %s", inner_e)
+
     except Forbidden:
         logger.warning("Bot interdit dans le groupe %s", chat_id)
+
     except BadRequest as e:
         logger.warning("Impossible d'envoyer le warning dans %s : %s", chat_id, e)
+
     except Exception as e:
         logger.exception("Erreur send_ai_warning_to_group chat=%s : %s", chat_id, e)
 
 
-async def delete_warning_job(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    try:
-        await context.bot.delete_message(
-            chat_id=data["chat_id"],
-            message_id=data["message_id"],
-        )
-        set_last_warning_message_id(data["chat_id"], None)
-    except Exception:
-        pass
-
-
 async def show_groups_menu(query, mode: str):
     groups = get_all_active_groups()
-
     if not groups:
-        await query.edit_message_text(
+        await safe_edit(
+            query,
             "Aucun groupe actif trouvé.",
             reply_markup=admin_back_keyboard(),
         )
         return
 
-    await query.edit_message_text(
-        text="Choisis un groupe :",
+    await safe_edit(
+        query,
+        "Choisis un groupe :",
         reply_markup=group_list_keyboard(groups, mode),
     )
 
@@ -685,7 +708,8 @@ async def show_groups_menu(query, mode: str):
 async def show_group_menu(query, group_id: int):
     group = get_group(group_id)
     if not group:
-        await query.edit_message_text(
+        await safe_edit(
+            query,
             "Groupe introuvable.",
             reply_markup=admin_back_keyboard(),
         )
@@ -701,8 +725,9 @@ async def show_group_menu(query, group_id: int):
         f"Nouveaux membres comptés : {join_counter}/{RULES_EVERY_JOINS}"
     )
 
-    await query.edit_message_text(
-        text=text,
+    await safe_edit(
+        query,
+        text,
         parse_mode=ParseMode.HTML,
         reply_markup=group_actions_keyboard(group_id, bool(is_active)),
     )
@@ -726,8 +751,9 @@ async def show_group_words_menu(query, group_id: int):
         f"{preview}"
     )
 
-    await query.edit_message_text(
-        text=text,
+    await safe_edit(
+        query,
+        text,
         parse_mode=ParseMode.HTML,
         reply_markup=group_words_keyboard(group_id),
     )
@@ -762,30 +788,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    message = update.effective_message
-
-    if not user or not chat or not message:
-        return
-
-    if not is_main_admin(user.id):
-        await message.reply_text("Tu n’es pas admin, garde la pêche 🍑")
-        return
-
-    if chat.type != ChatType.PRIVATE:
-        return
-
-    clear_admin_state(user.id)
-
-    await message.reply_text(
-        text="⚙️ <b>Panel Admin</b>\n\nChoisis une action :",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_main_keyboard(),
-    )
-
-
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_main_admin(user.id):
@@ -796,11 +798,13 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def rulesnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_admin_user(update):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat or not is_main_admin(user.id):
         return
 
-    chat = update.effective_chat
-    if not chat or chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+    if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await update.effective_message.reply_text("Utilise cette commande dans un groupe.")
         return
 
@@ -815,11 +819,13 @@ async def rulesnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def warnnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_admin_user(update):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if not user or not chat or not is_main_admin(user.id):
         return
 
-    chat = update.effective_chat
-    if not chat or chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+    if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await update.effective_message.reply_text("Utilise cette commande dans un groupe.")
         return
 
@@ -852,8 +858,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "admin_home":
         clear_admin_state(user.id)
-        await query.edit_message_text(
-            text="⚙️ <b>Panel Admin</b>\n\nChoisis une action :",
+        await safe_edit(
+            query,
+            "⚙️ <b>Panel Admin</b>\n\nChoisis une action :",
             parse_mode=ParseMode.HTML,
             reply_markup=admin_main_keyboard(),
         )
@@ -872,35 +879,31 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data.startswith("group_menu:"):
-        group_id = int(data.split(":")[1])
-        await show_group_menu(query, group_id)
+        await show_group_menu(query, int(data.split(":")[1]))
         return
 
     if data.startswith("pick_send:"):
         group_id = int(data.split(":")[1])
         set_admin_state(user.id, "send_message", group_id)
-        await query.edit_message_text(
-            text=(
-                "📢 Envoie maintenant le message à diffuser dans ce groupe.\n\n"
-                "Le prochain message texte que tu enverras ici sera envoyé au groupe."
-            ),
+        await safe_edit(
+            query,
+            "📢 Envoie maintenant le message à diffuser dans ce groupe.\n\n"
+            "Le prochain message texte que tu enverras ici sera envoyé au groupe.",
             reply_markup=admin_back_keyboard(),
         )
         return
 
     if data.startswith("pick_words:"):
-        group_id = int(data.split(":")[1])
-        await show_group_words_menu(query, group_id)
+        await show_group_words_menu(query, int(data.split(":")[1]))
         return
 
     if data.startswith("group_send:"):
         group_id = int(data.split(":")[1])
         set_admin_state(user.id, "send_message", group_id)
-        await query.edit_message_text(
-            text=(
-                "📢 Envoie maintenant le message à diffuser dans ce groupe.\n\n"
-                "Le prochain message texte que tu enverras ici sera envoyé au groupe."
-            ),
+        await safe_edit(
+            query,
+            "📢 Envoie maintenant le message à diffuser dans ce groupe.\n\n"
+            "Le prochain message texte que tu enverras ici sera envoyé au groupe.",
             reply_markup=admin_back_keyboard(),
         )
         return
@@ -914,10 +917,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode=ParseMode.HTML,
             )
             log_action(group_id, user.id, "manual_rules", "règles envoyées manuellement")
-            await query.answer("Règles envoyées.", show_alert=False)
-        except Exception as e:
-            logger.exception("Erreur envoi règles: %s", e)
+            await query.answer("Règles envoyées.")
+        except Exception:
             await query.answer("Échec de l'envoi.", show_alert=True)
+
         await show_group_menu(query, group_id)
         return
 
@@ -930,15 +933,15 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data.startswith("group_words:"):
-        group_id = int(data.split(":")[1])
-        await show_group_words_menu(query, group_id)
+        await show_group_words_menu(query, int(data.split(":")[1]))
         return
 
     if data.startswith("words_add:"):
         group_id = int(data.split(":")[1])
         set_admin_state(user.id, "add_word", group_id)
-        await query.edit_message_text(
-            text="➕ Envoie maintenant le mot ou l’expression à interdire.",
+        await safe_edit(
+            query,
+            "➕ Envoie maintenant le mot ou l’expression à interdire.",
             reply_markup=admin_back_keyboard(),
         )
         return
@@ -946,15 +949,16 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data.startswith("words_remove:"):
         group_id = int(data.split(":")[1])
         set_admin_state(user.id, "remove_word", group_id)
-        await query.edit_message_text(
-            text="➖ Envoie maintenant le mot ou l’expression à supprimer de la liste.",
+        await safe_edit(
+            query,
+            "➖ Envoie maintenant le mot ou l’expression à supprimer de la liste.",
             reply_markup=admin_back_keyboard(),
         )
         return
 
 
 # =========================================================
-# GESTION DES MESSAGES PRIVÉS DE L'ADMIN
+# MESSAGES PRIVÉS ADMIN
 # =========================================================
 
 
@@ -985,15 +989,12 @@ async def admin_private_text_handler(update: Update, context: ContextTypes.DEFAU
 
     if not group_id:
         clear_admin_state(user.id)
-        await message.reply_text("Action invalide. Recommence avec /panel")
+        await message.reply_text("Action invalide.")
         return
 
     if action == "send_message":
         try:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text=text,
-            )
+            await context.bot.send_message(chat_id=group_id, text=text)
             log_action(group_id, user.id, "manual_send", "message personnalisé")
             clear_admin_state(user.id)
             await message.reply_text("✅ Message envoyé.", reply_markup=admin_main_keyboard())
@@ -1007,15 +1008,9 @@ async def admin_private_text_handler(update: Update, context: ContextTypes.DEFAU
         clear_admin_state(user.id)
         if added:
             log_action(group_id, user.id, "add_bad_word", text.lower())
-            await message.reply_text(
-                f"✅ Mot ajouté : {text.lower()}",
-                reply_markup=admin_main_keyboard(),
-            )
+            await message.reply_text(f"✅ Mot ajouté : {text.lower()}", reply_markup=admin_main_keyboard())
         else:
-            await message.reply_text(
-                "ℹ️ Ce mot existe déjà ou est invalide.",
-                reply_markup=admin_main_keyboard(),
-            )
+            await message.reply_text("ℹ️ Ce mot existe déjà ou est invalide.", reply_markup=admin_main_keyboard())
         return
 
     if action == "remove_word":
@@ -1023,20 +1018,14 @@ async def admin_private_text_handler(update: Update, context: ContextTypes.DEFAU
         clear_admin_state(user.id)
         if removed:
             log_action(group_id, user.id, "remove_bad_word", text.lower())
-            await message.reply_text(
-                f"✅ Mot supprimé : {text.lower()}",
-                reply_markup=admin_main_keyboard(),
-            )
+            await message.reply_text(f"✅ Mot supprimé : {text.lower()}", reply_markup=admin_main_keyboard())
         else:
-            await message.reply_text(
-                "ℹ️ Mot introuvable.",
-                reply_markup=admin_main_keyboard(),
-            )
+            await message.reply_text("ℹ️ Mot introuvable.", reply_markup=admin_main_keyboard())
         return
 
 
 # =========================================================
-# TRACK GROUPS
+# GROUP TRACKING
 # =========================================================
 
 
@@ -1050,9 +1039,7 @@ async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_T
     if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
         return
 
-    old_status = cmu.old_chat_member.status
     new_status = cmu.new_chat_member.status
-
     title = chat.title or str(chat.id)
 
     if new_status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR]:
@@ -1064,11 +1051,9 @@ async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_T
         upsert_group(chat.id, title, False)
         logger.info("Bot retiré du groupe %s (%s)", title, chat.id)
 
-    logger.info("my_chat_member change %s -> %s dans %s", old_status, new_status, chat.id)
-
 
 # =========================================================
-# NOUVEAUX MEMBRES
+# NEW MEMBERS
 # =========================================================
 
 
@@ -1086,7 +1071,6 @@ async def handle_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE)
     upsert_group(chat.id, title, True)
     ensure_default_bad_words(chat.id)
 
-    # Tenter de supprimer le message système d'arrivée
     await delete_message_safe(message)
 
     if not is_group_active(chat.id):
@@ -1108,7 +1092,7 @@ async def handle_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-# MODÉRATION
+# MODERATION
 # =========================================================
 
 
@@ -1138,28 +1122,28 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (message.text or message.caption or "").strip()
     lowered = text.lower()
 
-    # Liens
-    if text and text_contains_link(lowered):
+    logger.info("MODERATION CHECK | chat=%s | user=%s | text=%s", chat.id, user.id, text)
+
+    if text and LINK_REGEX.search(lowered):
         await delete_message_safe(message)
         await restrict_or_ban(chat.id, user.id, context, "Lien interdit")
         return
 
-    # DM bait / spam ciblé
     if text and USERNAME_BAIT_REGEX.search(lowered):
         await delete_message_safe(message)
         await restrict_or_ban(chat.id, user.id, context, "Incitation au privé / DM")
         return
 
-    # Mots interdits
     if text:
         bad_words = list_bad_words(chat.id)
+        logger.info("BAD WORDS FOR %s: %s", chat.id, bad_words)
+
         for bad_word in bad_words:
             if bad_word and bad_word in lowered:
                 await delete_message_safe(message)
                 await restrict_or_ban(chat.id, user.id, context, f"Mot interdit : {bad_word}")
                 return
 
-    # Spam générique
     if text:
         for pattern in SPAM_PATTERNS:
             if pattern.search(lowered):
@@ -1169,7 +1153,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# JOB PÉRIODIQUE
+# JOBS
 # =========================================================
 
 
@@ -1177,6 +1161,18 @@ async def periodic_warning_job(context: ContextTypes.DEFAULT_TYPE):
     groups = get_all_active_groups()
     for group_id, _title in groups:
         await send_ai_warning_to_group(group_id, context)
+
+
+# =========================================================
+# ERRORS
+# =========================================================
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    if isinstance(err, BadRequest) and "Message is not modified" in str(err):
+        return
+    logger.exception("Erreur non gérée:", exc_info=err)
 
 
 # =========================================================
@@ -1209,7 +1205,6 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("panel", panel_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("rulesnow", rulesnow_cmd))
     app.add_handler(CommandHandler("warnnow", warnnow_cmd))
@@ -1218,7 +1213,6 @@ def main():
     app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_members))
 
-    # Messages privés de l'admin pour les actions du panel
     app.add_handler(
         MessageHandler(
             filters.TEXT & filters.ChatType.PRIVATE,
@@ -1226,13 +1220,14 @@ def main():
         )
     )
 
-    # Modération générale dans les groupes
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & ~filters.ChatType.PRIVATE,
             moderate_message,
         )
     )
+
+    app.add_error_handler(error_handler)
 
     logger.info("Bot lancé.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
