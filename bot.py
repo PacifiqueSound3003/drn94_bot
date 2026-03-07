@@ -32,12 +32,12 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_ID", "").split(",") if x]
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN manquant.")
-if not ADMIN_ID:
+if not ADMIN_IDS:
     raise RuntimeError("ADMIN_ID manquant.")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL manquant.")
@@ -174,7 +174,7 @@ def init_db():
 
 
 def is_main_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 
 def upsert_group(chat_id: int, title: str, is_active: bool = True):
