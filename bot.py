@@ -57,8 +57,8 @@ RULES_TEXT = (
 
 AI_WARNING_TEXT = (
     "🚨🚨 ⚠️ <b>Analyse du contenu via l’intelligence artificielle.</b>\n\n"
-    "Tout contenu posté pour attirer les membres en DM sera détecté "
-    "et l’utilisateur supprimé. 🚨🚨"
+    "Tout contenu posté pour attirer les membres en DM sera détecté pour notre IA "
+    "et l’utilisateur supprimé - blacklisté. 🚨🚨"
 )
 
 DEFAULT_BAD_WORDS = [
