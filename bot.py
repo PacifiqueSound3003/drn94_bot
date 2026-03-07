@@ -739,33 +739,47 @@ async def show_group_words_menu(query, group_id: int):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user and is_main_admin(update.effective_user.id):
-        await update.effective_message.reply_text(
-            "Bot actif.\n\n"
-            "Ouvre le panel avec /panel"
-        )
-    else:
-        await update.effective_message.reply_text("Bot de modération actif.")
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if not user or not chat or not message:
+        return
+
+    if not is_main_admin(user.id):
+        await message.reply_text("Tu n’es pas admin, garde la pêche 🍑")
+        return
+
+    if chat.type != ChatType.PRIVATE:
+        return
+
+    clear_admin_state(user.id)
+
+    await message.reply_text(
+        text="⚙️ <b>Panel Admin</b>\n\nChoisis une action :",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_main_keyboard(),
+    )
 
 
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
+    message = update.effective_message
 
-    if not user or not is_main_admin(user.id):
-        if update.effective_message:
-            await update.effective_message.reply_text("⛔ Accès refusé.")
+    if not user or not chat or not message:
         return
 
-    if not chat or chat.type != ChatType.PRIVATE:
-        await update.effective_message.reply_text(
-            "Ouvre le panel en message privé avec le bot."
-        )
+    if not is_main_admin(user.id):
+        await message.reply_text("Tu n’es pas admin, garde la pêche 🍑")
+        return
+
+    if chat.type != ChatType.PRIVATE:
         return
 
     clear_admin_state(user.id)
 
-    await update.effective_message.reply_text(
+    await message.reply_text(
         text="⚙️ <b>Panel Admin</b>\n\nChoisis une action :",
         parse_mode=ParseMode.HTML,
         reply_markup=admin_main_keyboard(),
