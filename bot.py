@@ -1129,7 +1129,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_group_active(chat.id):
         return
 
-    if user.id == ADMIN_ID:
+    if is_main_admin(user.id):
         return
 
     if await user_is_group_admin(chat.id, user.id, context):
