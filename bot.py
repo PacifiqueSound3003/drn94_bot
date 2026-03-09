@@ -518,6 +518,18 @@ async def delete_message_safe(message):
     except Exception:
         pass
 
+async def handle_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return
+
+    if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        return
+
+    await delete_message_safe(message)
+
 
 async def user_is_group_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -1228,6 +1240,11 @@ def main():
     )
 
     app.add_error_handler(error_handler)
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_left_member))
+
+    app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_members))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_left_member))
 
     logger.info("Bot lancé.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
