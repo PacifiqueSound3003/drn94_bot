@@ -3,7 +3,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from html import escape
-from typing import Optional
+from typing import Optional 
 
 import psycopg
 from dotenv import load_dotenv
